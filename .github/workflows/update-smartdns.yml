@@ -1,0 +1,195 @@
+name: Update and Package SmartDNS
+
+on:
+  workflow_dispatch:
+    inputs:
+      sdk_type:
+        description: 'SDK type to use'
+        required: true
+        default: 'immortalwrt'
+        type: choice
+        options:
+          - immortalwrt
+          - openwrt
+  schedule:
+    - cron: '0 0 * * *'
+  push:
+    branches:
+      - master
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd wget
+
+      - name: Set up Git user
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Sync with upstream and check for changes
+        id: sync
+        run: |
+          # Function to extract version variables from Makefile for comparison
+          get_makefile_vars() {
+            grep -E "^(PKG_VERSION|PKG_SOURCE_VERSION|SMARTDNS_WEBUI_VERSION|SMARTDNS_WEBUI_SOURCE_VERSION)[[:space:]]*:?=" Makefile | sort
+          }
+
+          echo "==> Capturing current Makefile variables..."
+          BEFORE_VARS=$(get_makefile_vars)
+          echo "$BEFORE_VARS"
+
+          git remote add upstream https://github.com/pymumu/openwrt-smartdns.git
+          git fetch upstream
+
+          # Save current HEAD to restore .github later
+          CURRENT_HEAD=$(git rev-parse HEAD)
+
+          echo "==> Resetting to upstream/master..."
+          git reset --hard upstream/master
+
+          # Restore .github directory from the original commit
+          git checkout $CURRENT_HEAD -- .github/
+
+          echo "==> Capturing upstream Makefile variables..."
+          AFTER_VARS=$(get_makefile_vars)
+          echo "$AFTER_VARS"
+
+          if [ "$BEFORE_VARS" != "$AFTER_VARS" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "==> Changes detected in Makefile versions."
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "==> No changes in Makefile versions."
+          fi
+
+      - name: Download and Extract SDK
+        if: steps.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        run: |
+          SDK_TYPE="${{ github.event.inputs.sdk_type || 'immortalwrt' }}"
+          
+          if [ "${SDK_TYPE}" = "openwrt" ]; then
+              SDK_BASE_URL="https://downloads.openwrt.org/snapshots/targets/x86/64/"
+          elif [ "${SDK_TYPE}" = "immortalwrt" ]; then
+              SDK_BASE_URL="https://downloads.immortalwrt.org/snapshots/targets/x86/64/"
+          else
+              echo "ERROR: Unsupported SDK type: ${SDK_TYPE}."
+              exit 1
+          fi
+
+          echo "==> Setting up SDK for ${SDK_TYPE} from ${SDK_BASE_URL}..."
+          SDK_FILENAME=$(wget -q -O - "${SDK_BASE_URL}" | grep -oP "${SDK_TYPE}-sdk.*\.tar\.zst" | awk -F'>' '{print $NF}')
+          
+          if [ -z "${SDK_FILENAME}" ]; then
+            echo "ERROR: Could not find SDK filename on ${SDK_BASE_URL}"
+            exit 1
+          fi
+          echo "==> Found latest SDK: ${SDK_FILENAME}"
+
+          wget -q --show-progress "${SDK_BASE_URL}${SDK_FILENAME}"
+          SDK_EXTRACTED_DIR="sdk"
+          mkdir -p "${SDK_EXTRACTED_DIR}"
+          zstd -d -c "${SDK_FILENAME}" | tar -xf - -C "${SDK_EXTRACTED_DIR}" --strip-components=1
+          echo "==> SDK setup complete."
+
+      - name: Set up Toolchain Environment
+        if: steps.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        run: |
+          echo "==> Setting up toolchain environment..."
+          HOST_DIR=$(find sdk/staging_dir -type d -name "host" | head -n 1)
+          if [ -z "${HOST_DIR}" ]; then
+            echo "ERROR: Could not find the 'host' directory in the SDK."
+            exit 1
+          fi
+          echo "==> Found host directory at ${HOST_DIR}"
+          
+          echo "HOST_TAR=$(realpath ${HOST_DIR}/bin/tar)" >> $GITHUB_ENV
+          echo "HOST_ZSTD=$(realpath ${HOST_DIR}/bin/zstd)" >> $GITHUB_ENV
+          echo "HOST_GZ=$(realpath ${HOST_DIR}/bin/gzip)" >> $GITHUB_ENV
+
+      - name: Extract Makefile Variables
+        if: steps.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        run: |
+          echo "==> Extracting variables from Makefile..."
+          echo "PKG_NAME=$(grep -E "^PKG_NAME[[:space:]]*:?=" Makefile | head -n 1 | sed -E "s/^PKG_NAME[[:space:]]*:?=(.*)/\1/" | xargs)" >> $GITHUB_ENV
+          echo "PKG_VERSION=$(grep -E "^PKG_VERSION[[:space:]]*:?=" Makefile | head -n 1 | sed -E "s/^PKG_VERSION[[:space:]]*:?=(.*)/\1/" | xargs)" >> $GITHUB_ENV
+          echo "PKG_SOURCE_URL=$(grep -E "^PKG_SOURCE_URL[[:space:]]*:?=" Makefile | head -n 1 | sed -E "s/^PKG_SOURCE_URL[[:space:]]*:?=(.*)/\1/" | xargs)" >> $GITHUB_ENV
+          echo "PKG_SOURCE_VERSION=$(grep -E "^PKG_SOURCE_VERSION[[:space:]]*:?=" Makefile | head -n 1 | sed -E "s/^PKG_SOURCE_VERSION[[:space:]]*:?=(.*)/\1/" | xargs)" >> $GITHUB_ENV
+          echo "PKG_MIRROR_HASH_OLD=$(grep -E "^PKG_MIRROR_HASH[[:space:]]*:?=" Makefile | head -n 1 | sed -E "s/^PKG_MIRROR_HASH[[:space:]]*:?=(.*)/\1/" | xargs)" >> $GITHUB_ENV
+          echo "SMARTDNS_WEBUI_VERSION=$(grep -E "^SMARTDNS_WEBUI_VERSION[[:space:]]*:?=" Makefile | head -n 1 | sed -E "s/^SMARTDNS_WEBUI_VERSION[[:space:]]*:?=(.*)/\1/" | xargs)" >> $GITHUB_ENV
+          echo "SMARTDNS_WEBUI_SOURCE_URL=$(grep -E "^SMARTDNS_WEBUI_SOURCE_URL[[:space:]]*:?=" Makefile | head -n 1 | sed -E "s/^SMARTDNS_WEBUI_SOURCE_URL[[:space:]]*:?=(.*)/\1/" | xargs)" >> $GITHUB_ENV
+          echo "SMARTDNS_WEBUI_SOURCE_VERSION=$(grep -E "^SMARTDNS_WEBUI_SOURCE_VERSION[[:space:]]*:?=" Makefile | head -n 1 | sed -E "s/^SMARTDNS_WEBUI_SOURCE_VERSION[[:space:]]*:?=(.*)/\1/" | xargs)" >> $GITHUB_ENV
+          echo "SMARTDNS_WEBUI_HASH_OLD=$(awk '/define Download\/smartdns-webui/,/endef/ { if ($0 ~ /MIRROR_HASH:=/) { sub(/.*MIRROR_HASH:=/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0); print; exit } }' Makefile)" >> $GITHUB_ENV
+
+      - name: Package SmartDNS and update Makefile
+        if: steps.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        run: |
+          export LC_ALL=C
+
+          download_and_package() {
+              local pkg_name="$1"
+              local pkg_version="$2"
+              local pkg_source_url="$3"
+              local pkg_source_version="$4"
+              local file_extension="$5"
+              local subdir=""
+              local compressor=""
+              local output_filename="${pkg_name}-${pkg_version}${file_extension}"
+              
+              case "${file_extension}" in
+                  .tar.gz) compressor="${{env.HOST_GZ}}"; subdir="${pkg_name}";;
+                  .tar.zst) compressor="${{env.HOST_ZSTD}} -T0 --ultra -20"; subdir="${pkg_name}-${pkg_version}";;
+                  *) echo "ERROR: Unknown compression format for ${file_extension}"; exit 1;;
+              esac
+
+              echo "==> Processing ${pkg_name}..."
+              local current_tmp_dir=$(mktemp -d)
+              pushd "${current_tmp_dir}" > /dev/null
+              
+              git clone --filter=blob:none "${pkg_source_url}" "${subdir}"
+              (cd "${subdir}" && git checkout "${pkg_source_version}")
+              
+              export TAR_TIMESTAMP=$(cd "${subdir}" && git log -1 --no-show-signature --format='%ct')
+              
+              (cd "${subdir}" && git config core.abbrev 8 && git archive --format=tar HEAD --output="../${subdir}.tar.git")
+              "${{env.HOST_TAR}}" --numeric-owner --owner=0 --group=0 --ignore-failed-read -C "${subdir}" -f "${subdir}.tar.git" -r .git .gitmodules 2>/dev/null
+              
+              rm -rf "${subdir}" && mkdir "${subdir}"
+              "${{env.HOST_TAR}}" -C "${subdir}" -xf "${subdir}.tar.git"
+              (cd "${subdir}" && git submodule update --init --recursive -- && rm -rf .git .gitmodules)
+              
+              "${{env.HOST_TAR}}" --numeric-owner --owner=0 --group=0 --mode=a-s --sort=name --mtime="@${TAR_TIMESTAMP}" -c "${subdir}" | ${compressor} -c > "${output_filename}"
+              
+              mv -f "${output_filename}" "${GITHUB_WORKSPACE}/dl/"
+              popd > /dev/null
+              rm -rf "${current_tmp_dir}"
+          }
+          export -f download_and_package
+
+          mkdir -p dl
+          bash -c "download_and_package '${{env.PKG_NAME}}' '${{env.PKG_VERSION}}' '${{env.PKG_SOURCE_URL}}' '${{env.PKG_SOURCE_VERSION}}' '.tar.zst'"
+          bash -c "download_and_package 'smartdns-webui' '${{env.SMARTDNS_WEBUI_VERSION}}' '${{env.SMARTDNS_WEBUI_SOURCE_URL}}' '${{env.SMARTDNS_WEBUI_SOURCE_VERSION}}' '.tar.gz'"
+
+          echo "==> Calculating new hashes and updating Makefile..."
+          NEW_SMARTDNS_HASH=$(sha256sum "dl/${{env.PKG_NAME}}-${{env.PKG_VERSION}}.tar.zst" | awk '{print $1}')
+          NEW_SMARTDNS_WEBUI_HASH=$(sha256sum "dl/smartdns-webui-${{env.SMARTDNS_WEBUI_VERSION}}.tar.gz" | awk '{print $1}')
+
+          sed -i "s/${{env.PKG_MIRROR_HASH_OLD}}/${NEW_SMARTDNS_HASH}/" Makefile
+          sed -i "s/${{env.SMARTDNS_WEBUI_HASH_OLD}}/${NEW_SMARTDNS_WEBUI_HASH}/" Makefile
+
+      - name: Commit and push changes
+        if: steps.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Automated: Update SmartDNS and WebUI packages"
+          file_pattern: Makefile
+          push_options: '--force'
