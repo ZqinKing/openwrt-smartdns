@@ -71,7 +71,9 @@ jobs:
             "${{ env.PKG_SOURCE_URL }}" \
             "${{ env.PKG_SOURCE_VERSION }}" \
             ".tar.zst" \
-            "dl"
+            "dl" \
+            "${{ env.PKG_SOURCE_FILE }}" \
+            "${{ env.PKG_SOURCE_URL_FILE }}"
 
       - name: Download and package SmartDNS WebUI
         if: steps.sync.outputs.changed == 'true' || github.event.inputs.force_update == 'true' || github.event_name == 'workflow_dispatch'
@@ -83,7 +85,9 @@ jobs:
             "${{ env.SMARTDNS_WEBUI_SOURCE_URL }}" \
             "${{ env.SMARTDNS_WEBUI_SOURCE_VERSION }}" \
             ".tar.gz" \
-            "dl"
+            "dl" \
+            "${{ env.SMARTDNS_WEBUI_SOURCE_FILE }}" \
+            "${{ env.SMARTDNS_WEBUI_SOURCE_URL_FILE }}"
 
       - name: Update Makefile hashes
         if: steps.sync.outputs.changed == 'true' || github.event.inputs.force_update == 'true' || github.event_name == 'workflow_dispatch'
