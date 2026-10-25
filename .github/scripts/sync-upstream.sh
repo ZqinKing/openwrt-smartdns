@@ -47,6 +47,11 @@ git reset --hard "upstream/${UPSTREAM_BRANCH}"
 echo "==> Restoring .github directory from ${CURRENT_HEAD}..."
 git checkout "${CURRENT_HEAD}" -- .github/
 
+# Keep the current branch as the commit base while leaving upstream files in
+# the working tree for the commit step to select.
+echo "==> Restoring current commit as the branch base..."
+git reset "${CURRENT_HEAD}"
+
 echo "==> Capturing upstream Makefile variables..."
 AFTER_VARS=$(get_makefile_vars)
 echo "$AFTER_VARS"
