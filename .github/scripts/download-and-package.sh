@@ -1,11 +1,12 @@
 #!/bin/bash
 #
-# Download source from git and create reproducible tarball
-# Usage: download-and-package.sh <pkg_name> <pkg_version> <source_url> <source_version> <file_extension> <output_dir>
+# Download source from git or a pinned archive
+# Usage: download-and-package.sh <pkg_name> <pkg_version> <source_url> <source_version> <file_extension> <output_dir> [source_file] [source_url_file]
 #
 # Supports:
 #   .tar.gz  - gzip compressed (for webui)
 #   .tar.zst - zstd compressed (for smartdns main)
+#   source_file + source_url_file - download the exact archive named by the Makefile
 #
 
 set -euo pipefail
@@ -16,12 +17,49 @@ PKG_SOURCE_URL="$3"
 PKG_SOURCE_VERSION="$4"
 FILE_EXTENSION="$5"
 OUTPUT_DIR="$(realpath -m "${6:-.}")"
+PKG_SOURCE_FILE="${7:-}"
+PKG_SOURCE_URL_FILE="${8:-}"
 
 HOST_TAR="${HOST_TAR:-tar}"
 HOST_ZSTD="${HOST_ZSTD:-zstd}"
 HOST_GZ="${HOST_GZ:-gzip}"
 
-OUTPUT_FILENAME="${PKG_NAME}-${PKG_VERSION}${FILE_EXTENSION}"
+OUTPUT_FILENAME="${PKG_SOURCE_FILE:-${PKG_NAME}-${PKG_VERSION}${FILE_EXTENSION}}"
+
+echo "==> Processing ${PKG_NAME} v${PKG_VERSION}..."
+echo "    Source: ${PKG_SOURCE_URL}"
+echo "    Version: ${PKG_SOURCE_VERSION}"
+echo "    Output: ${OUTPUT_DIR}/${OUTPUT_FILENAME}"
+
+# Create temporary directory
+TMP_DIR=$(mktemp -d)
+trap "rm -rf '${TMP_DIR}'" EXIT
+
+pushd "${TMP_DIR}" > /dev/null
+
+# Newer OpenWrt package definitions use a codeload URL plus URL_FILE. Keep
+# that archive byte-for-byte so its PKG_HASH remains valid.
+if [[ -n "${PKG_SOURCE_FILE}" || -n "${PKG_SOURCE_URL_FILE}" ]]; then
+    if [[ -z "${PKG_SOURCE_FILE}" || -z "${PKG_SOURCE_URL_FILE}" ]]; then
+        echo "ERROR: source_file and source_url_file must be provided together" >&2
+        exit 1
+    fi
+
+    DOWNLOAD_URL="${PKG_SOURCE_URL%/}/${PKG_SOURCE_URL_FILE}"
+    echo "==> Downloading pinned source archive..."
+    wget -q --show-progress --tries=3 --timeout=60 --waitretry=5 -O "${OUTPUT_FILENAME}" "${DOWNLOAD_URL}"
+
+    if [[ ! -s "${OUTPUT_FILENAME}" ]]; then
+        echo "ERROR: Downloaded archive is empty: ${OUTPUT_FILENAME}" >&2
+        exit 1
+    fi
+
+    mkdir -p "${OUTPUT_DIR}"
+    mv -f "${OUTPUT_FILENAME}" "${OUTPUT_DIR}/"
+    popd > /dev/null
+    echo "==> Done: ${OUTPUT_DIR}/${OUTPUT_FILENAME}"
+    exit 0
+fi
 
 case "${FILE_EXTENSION}" in
     .tar.gz)
@@ -37,17 +75,6 @@ case "${FILE_EXTENSION}" in
         exit 1
         ;;
 esac
-
-echo "==> Processing ${PKG_NAME} v${PKG_VERSION}..."
-echo "    Source: ${PKG_SOURCE_URL}"
-echo "    Version: ${PKG_SOURCE_VERSION}"
-echo "    Output: ${OUTPUT_DIR}/${OUTPUT_FILENAME}"
-
-# Create temporary directory
-TMP_DIR=$(mktemp -d)
-trap "rm -rf '${TMP_DIR}'" EXIT
-
-pushd "${TMP_DIR}" > /dev/null
 
 # Clone and checkout specific version
 echo "==> Cloning repository..."
